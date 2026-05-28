@@ -114,8 +114,12 @@ def extract_images_with_styles(xlsx_path: str) -> List[Dict]:
         row2style = {}
         for r in range(1, ws.max_row + 1):
             v = ws.cell(r, 4).value
-            if v and re.match(r'[A-Z]{2,4}\d', str(v)):
-                row2style[r - 1] = str(v).strip()  # openpyxl 1-based, drawing 0-based
+            if v:
+                raw = str(v).strip()
+                # 只取款號本體(大寫字母+數字),去掉後面的中文部位名稱
+                m = re.match(r'([A-Z]{2,4}\d[A-Z0-9]*)', raw)
+                if m:
+                    row2style[r - 1] = m.group(1)
 
         for row, rid in anchors:
             style = row2style.get(int(row))
@@ -201,7 +205,9 @@ async def extract(
         # 上傳到 Storage
         results = []
         for img in images:
-            unique_name = f"{img['style_no']}_{uuid.uuid4().hex[:8]}.{img['image_ext']}"
+            # 清理款號:只保留字母數字,去掉中文/空格/特殊字元
+            safe_style = re.sub(r'[^A-Za-z0-9_-]', '', img['style_no'])
+            unique_name = f"{safe_style}_{uuid.uuid4().hex[:8]}.{img['image_ext']}"
             try:
                 url = await upload_to_supabase_storage(img["image_bytes"], unique_name)
                 results.append({

@@ -50,9 +50,13 @@
   }
   function normStyle(s){
     s=clean(s);let part="";
-    const m=s.match(/(上衣|裤子|褲子|頭巾)/);
-    if(m){part=m[1];if(part==="褲子")part="裤子";}
-    const main=s.replace(/\s*(上衣|裤子|褲子|頭巾)\s*/g,"").trim();
+    const partMatch=s.match(/(上衣|裤子|褲子|頭巾|短袖|長袖|长袖|短裤|長褲|长裤|背心)/);
+    if(partMatch){part=partMatch[1];if(part==="褲子")part="裤子";}
+    // 先去掉部位名稱,再只取款號本體(英數)
+    let main=s.replace(/\s*(上衣|裤子|褲子|頭巾|短袖|長袖|长袖|短裤|長褲|长裤|背心)\s*/g,"").trim();
+    // 只保留款號本體(大寫字母+數字),去掉尾巴的中文
+    const styleOnly=main.match(/^([A-Za-z]{2,4}\d[A-Za-z0-9]*)/);
+    if(styleOnly)main=styleOnly[1].toUpperCase();
     return [main,part];
   }
   function parseColor(raw){
@@ -129,15 +133,18 @@
     return records;
   }
   function periodFromFilename(fn){
-    let m=fn.match(/(\d{4})[-_年](\d{1,2})/);
+    // 支援: 2024-07、2024年07月、2024- 07月、2024_07 等格式
+    let m=fn.match(/(\d{4})\s*[-_年]\s*0*(\d{1,2})\s*月?/);
     if(m)return m[1]+"-"+String(m[2]).padStart(2,"0");
-    return fn;
+    return "";
   }
   function brandFromFilename(fn){
-    let s=fn.replace(/\.(xls|xlsx)$/i,"");
-    let m=s.match(/^([A-Za-z_'\-]+?)[\s_]*\d{4}/);
-    let brand=m?m[1]:s; brand=brand.replace(/_/g," ").replace(/\s+/g," ").trim();
+    let s=fn.replace(/\.(xls|xlsx)$/i,"").replace(/複本\s*/g,"").replace(/庫存總表|庫存表|總表|存量表/g,"").trim();
+    // 找連續英文字母(品牌名)
+    let m=s.match(/([A-Za-z']{3,}(?:[\s_][A-Za-z']+)*)/);
+    let brand=m?m[1].replace(/_/g," ").trim():"";
     if(/carter/i.test(brand))brand="Carter's";
+    if(/garan/i.test(brand))brand="GARAN";
     return brand||"(未知品牌)";
   }
   window.brandFromFilename=brandFromFilename;
