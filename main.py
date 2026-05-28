@@ -15,12 +15,18 @@ app = FastAPI(title="StockSense Image Extractor")
 
 # CORS:允許前端網域呼叫
 ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "*").split(",")
+
+# 注意:allow_credentials=True 不能搭配 allow_origins=["*"]
+# 若 ALLOWED_ORIGINS 是 * 就改成不帶 credentials 模式
+_use_credentials = ALLOWED_ORIGINS != ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=["*"] if not _use_credentials else ALLOWED_ORIGINS,
+    allow_credentials=_use_credentials,
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Supabase 設定(從環境變數讀,部署時設定)
@@ -147,6 +153,12 @@ async def upload_to_supabase_storage(image_bytes: bytes, filename: str, access_t
 @app.get("/")
 def health():
     return {"ok": True, "service": "StockSense Image Extractor"}
+
+
+@app.options("/extract")
+def extract_preflight():
+    """明確處理 CORS preflight"""
+    return {"ok": True}
 
 
 @app.post("/extract")
