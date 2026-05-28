@@ -2,14 +2,13 @@
 StockSense 抽圖後端
 功能:接收 Excel,抽出內嵌圖片並對應款號,上傳到 Supabase Storage,回傳結果。
 """
-import os, re, zipfile, tempfile, subprocess, shutil, uuid, base64
+import os, re, zipfile, tempfile, subprocess, shutil, uuid
 from typing import List, Dict, Optional
 from fastapi import FastAPI, UploadFile, File, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 import openpyxl
 import httpx
-import jwt as pyjwt
 
 app = FastAPI(title="StockSense Image Extractor")
 
@@ -38,19 +37,22 @@ SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET", "")    # 用來驗 a
 BUCKET = "product-images"
 
 
-def verify_token(authorization: Optional[str] = Header(None)) -> Dict:
-    """驗證前端傳來的 Supabase JWT,確認是合法登入使用者。"""
+async def verify_token(authorization: Optional[str] = Header(None)) -> Dict:
+    """把 token 送給 Supabase 驗證，完全不碰 JWT 演算法，避開 ES256 問題。"""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="缺少 Authorization header")
     token = authorization.split(" ", 1)[1]
-    try:
-        # Supabase JWT 用 HS256 簽,secret 從專案設定取得
-        payload = pyjwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"], audience="authenticated")
-        return payload
-    except pyjwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token 已過期")
-    except pyjwt.InvalidTokenError as e:
-        raise HTTPException(status_code=401, detail=f"Token 無效: {e}")
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(
+            f"{SUPABASE_URL}/auth/v1/user",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "apikey": SUPABASE_SERVICE_KEY,
+            }
+        )
+    if r.status_code != 200:
+        raise HTTPException(status_code=401, detail=f"Token 驗證失敗: {r.text[:100]}")
+    return r.json()
 
 
 def convert_xls_to_xlsx(input_path: str, output_dir: str) -> str:
@@ -168,11 +170,11 @@ async def extract(
     authorization: Optional[str] = Header(None),
 ):
     """主端點:接收 Excel,抽圖,上傳 Storage,回傳結果供前端核對。"""
-    # 驗身份(同時拿原始 token 給 Storage 上傳用)
+    # 驗身份
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="缺少 Authorization header")
     access_token = authorization.split(" ", 1)[1]
-    payload = verify_token(authorization)
+    await verify_token(authorization)  # 丟出 401 就中斷
 
     # 存上傳檔到暫存目錄
     tmpdir = tempfile.mkdtemp(prefix="ssx_")
