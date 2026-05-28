@@ -209,11 +209,14 @@ async def extract(
                     "image_url": url,
                     "filename": unique_name,
                 })
+                print(f"✅ 上傳成功: {img['style_no']} -> {unique_name} ({len(img['image_bytes'])} bytes)")
             except Exception as e:
+                err_msg = str(e)
                 results.append({
                     "style_no": img["style_no"],
-                    "error": str(e),
+                    "error": err_msg,
                 })
+                print(f"❌ 上傳失敗: {img['style_no']} ({img['image_ext']}, {len(img['image_bytes'])} bytes) -> {err_msg}")
 
         return {
             "ok": True,

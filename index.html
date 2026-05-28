@@ -358,9 +358,14 @@ function ImportPage(){
       const data=await res.json();
       if(data.ok&&data.results){
         const m={};
-        data.results.forEach(r=>{if(r.image_url)m[r.style_no]=r.image_url;});
+        const errs=[];
+        data.results.forEach(r=>{
+          if(r.image_url)m[r.style_no]=r.image_url;
+          else if(r.error)errs.push(`${r.style_no}:${r.error.slice(0,60)}`);
+        });
         setImgMap(m);
-        setExtractMsg(`✅ 自動抽圖完成:${data.uploaded}/${data.extracted} 張已上傳`);
+        const errTxt=errs.length?` (失敗:${errs.slice(0,2).join(' | ')})`:''
+        setExtractMsg(`✅ 自動抽圖完成:${data.uploaded}/${data.extracted} 張已上傳${errTxt}`);
       }
     }catch(ex){setExtractMsg(`⚠ 自動抽圖失敗(可手動補):${ex.message.slice(0,80)}`);}
     setExtracting(false);
