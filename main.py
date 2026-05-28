@@ -135,21 +135,24 @@ def extract_images_with_styles(xlsx_path: str) -> List[Dict]:
     return results
 
 
-async def upload_to_supabase_storage(image_bytes: bytes, filename: str, access_token: str) -> str:
-    """上傳圖片到 Supabase Storage,回傳公開 URL。用使用者的 token,符合 RLS。"""
+async def upload_to_supabase_storage(image_bytes: bytes, filename: str) -> str:
+    """上傳圖片到 Supabase Storage，用 service_role key 確保有權限。"""
     url = f"{SUPABASE_URL}/storage/v1/object/{BUCKET}/{filename}"
+    ext = filename.split('.')[-1].lower()
+    content_type = "image/jpeg" if ext in ("jpg","jpeg") else f"image/{ext}"
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
             url,
             content=image_bytes,
             headers={
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": f"image/{filename.split('.')[-1]}",
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Content-Type": content_type,
                 "x-upsert": "true",
             },
         )
         if r.status_code not in (200, 201):
-            raise RuntimeError(f"Storage 上傳失敗 ({r.status_code}): {r.text}")
+            raise RuntimeError(f"Storage 上傳失敗 ({r.status_code}): {r.text[:200]}")
     return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{filename}"
 
 
@@ -200,7 +203,7 @@ async def extract(
         for img in images:
             unique_name = f"{img['style_no']}_{uuid.uuid4().hex[:8]}.{img['image_ext']}"
             try:
-                url = await upload_to_supabase_storage(img["image_bytes"], unique_name, access_token)
+                url = await upload_to_supabase_storage(img["image_bytes"], unique_name)
                 results.append({
                     "style_no": img["style_no"],
                     "image_url": url,
