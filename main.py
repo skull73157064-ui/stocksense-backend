@@ -4,30 +4,31 @@ StockSense 抽圖後端
 """
 import os, re, zipfile, tempfile, subprocess, shutil, uuid, base64
 from typing import List, Dict, Optional
-from fastapi import FastAPI, UploadFile, File, HTTPException, Header, Depends
+from fastapi import FastAPI, UploadFile, File, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 import openpyxl
 import httpx
 import jwt as pyjwt
 
 app = FastAPI(title="StockSense Image Extractor")
 
-# CORS:允許前端網域呼叫
-ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "*").split(",")
-
-# 注意:allow_credentials=True 不能搭配 allow_origins=["*"]
-# 若 ALLOWED_ORIGINS 是 * 就改成不帶 credentials 模式
-_use_credentials = ALLOWED_ORIGINS != ["*"]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"] if not _use_credentials else ALLOWED_ORIGINS,
-    allow_credentials=_use_credentials,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
-    expose_headers=["*"],
-)
+# CORS: 最暴力可靠的做法,直接在每個 response 加 header
+@app.middleware("http")
+async def add_cors_headers(request: Request, call_next):
+    if request.method == "OPTIONS":
+        # preflight 直接回 200 + 允許 header
+        response = Response(status_code=200)
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        response.headers["Access-Control-Max-Age"] = "86400"
+        return response
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
 
 # Supabase 設定(從環境變數讀,部署時設定)
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
