@@ -1,6 +1,8 @@
 """
-StockSense 抽圖後端
-功能:接收 Excel,抽出內嵌圖片並對應款號,上傳到 Supabase Storage,回傳結果。
+StockSense 抽圖後端 v2
+功能:接收 Excel,抽出內嵌圖片並對應「款號+色號」,上傳到 Supabase Storage,回傳結果。
+修正:之前版本用 style_no 識別,導致同款不同色共用第一張圖。
+   現在用 (style_no, color_code) 組合識別,每個色號獨立一張圖。
 """
 import os, re, zipfile, tempfile, subprocess, shutil, uuid
 from typing import List, Dict, Optional
@@ -12,11 +14,9 @@ import httpx
 
 app = FastAPI(title="StockSense Image Extractor")
 
-# CORS: 最暴力可靠的做法,直接在每個 response 加 header
 @app.middleware("http")
 async def add_cors_headers(request: Request, call_next):
     if request.method == "OPTIONS":
-        # preflight 直接回 200 + 允許 header
         response = Response(status_code=200)
         response.headers["Access-Control-Allow-Origin"] = "*"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
@@ -29,26 +29,21 @@ async def add_cors_headers(request: Request, call_next):
     response.headers["Access-Control-Allow-Headers"] = "*"
     return response
 
-# Supabase 設定(從環境變數讀,部署時設定)
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")  # service_role key,後端用
-SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET", "")    # 用來驗 access token
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET", "")
 
 BUCKET = "product-images"
 
 
 async def verify_token(authorization: Optional[str] = Header(None)) -> Dict:
-    """把 token 送給 Supabase 驗證，完全不碰 JWT 演算法，避開 ES256 問題。"""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="缺少 Authorization header")
     token = authorization.split(" ", 1)[1]
     async with httpx.AsyncClient(timeout=10) as client:
         r = await client.get(
             f"{SUPABASE_URL}/auth/v1/user",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "apikey": SUPABASE_SERVICE_KEY,
-            }
+            headers={"Authorization": f"Bearer {token}", "apikey": SUPABASE_SERVICE_KEY}
         )
     if r.status_code != 200:
         raise HTTPException(status_code=401, detail=f"Token 驗證失敗: {r.text[:100]}")
@@ -56,7 +51,6 @@ async def verify_token(authorization: Optional[str] = Header(None)) -> Dict:
 
 
 def convert_xls_to_xlsx(input_path: str, output_dir: str) -> str:
-    """用 LibreOffice 把 .xls 轉成 .xlsx,回傳新檔路徑。"""
     result = subprocess.run(
         ["libreoffice", "--headless", "--convert-to", "xlsx", "--outdir", output_dir, input_path],
         capture_output=True, text=True, timeout=120
@@ -70,13 +64,22 @@ def convert_xls_to_xlsx(input_path: str, output_dir: str) -> str:
     return out
 
 
+def extract_color_code(cell_value) -> str:
+    """從「顏色」欄字串取出色號(例如 'BIH01 大愛 心 p752...' -> 'BIH01')"""
+    if cell_value is None:
+        return ""
+    s = str(cell_value).strip()
+    m = re.match(r'^([A-Z]{2,4}\d{1,4}[A-Z0-9]*)', s)
+    return m.group(1) if m else ""
+
+
 def extract_images_with_styles(xlsx_path: str) -> List[Dict]:
     """
-    從 xlsx 抽圖並對應款號。
-    回傳: [{style_no, part, image_bytes, image_ext}, ...]
+    從 xlsx 抽圖並對應「款號+色號」。
+    回傳: [{style_no, color_code, image_bytes, image_ext}, ...]
     """
     results = []
-    seen_styles = set()
+    seen_keys = set()  # 改成 (style, color) tuple,每個色號獨立追蹤
     z = zipfile.ZipFile(xlsx_path)
     names = z.namelist()
     ws_files = sorted([n for n in names if re.match(r'xl/worksheets/sheet\d+\.xml$', n)])
@@ -111,43 +114,53 @@ def extract_images_with_styles(xlsx_path: str) -> List[Dict]:
                 )
             }
         ws = wb[sn]
+        # 同時抓款號(第 4 欄) 和 色號(第 5 欄)
         row2style = {}
+        row2color = {}
         for r in range(1, ws.max_row + 1):
             v = ws.cell(r, 4).value
             if v:
                 raw = str(v).strip()
-                # 只取款號本體(大寫字母+數字),去掉後面的中文部位名稱
                 m = re.match(r'([A-Z]{2,4}\d[A-Z0-9]*)', raw)
                 if m:
                     row2style[r - 1] = m.group(1)
+            cv = ws.cell(r, 5).value
+            if cv:
+                cc = extract_color_code(cv)
+                if cc:
+                    row2color[r - 1] = cc
 
         for row, rid in anchors:
             style = row2style.get(int(row))
+            color = row2color.get(int(row), "")
             img = rid2img.get(rid)
-            if style and img and style not in seen_styles:
-                ext = img.split('.')[-1].lower()
-                if ext == 'jpeg':
-                    ext = 'jpg'
-                img_data = z.read('xl/media/' + img)
-                results.append({
-                    "style_no": style,
-                    "part": "",
-                    "image_bytes": img_data,
-                    "image_ext": ext,
-                })
-                seen_styles.add(style)
+            if not style or not img:
+                continue
+            key = (style, color)
+            if key in seen_keys:
+                continue
+            ext = img.split('.')[-1].lower()
+            if ext == 'jpeg':
+                ext = 'jpg'
+            img_data = z.read('xl/media/' + img)
+            results.append({
+                "style_no": style,
+                "color_code": color,
+                "part": "",
+                "image_bytes": img_data,
+                "image_ext": ext,
+            })
+            seen_keys.add(key)
     return results
 
 
 async def upload_to_supabase_storage(image_bytes: bytes, filename: str) -> str:
-    """上傳圖片到 Supabase Storage，用 service_role key 確保有權限。"""
     url = f"{SUPABASE_URL}/storage/v1/object/{BUCKET}/{filename}"
     ext = filename.split('.')[-1].lower()
     content_type = "image/jpeg" if ext in ("jpg","jpeg") else f"image/{ext}"
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
-            url,
-            content=image_bytes,
+            url, content=image_bytes,
             headers={
                 "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
                 "apikey": SUPABASE_SERVICE_KEY,
@@ -162,12 +175,11 @@ async def upload_to_supabase_storage(image_bytes: bytes, filename: str) -> str:
 
 @app.get("/")
 def health():
-    return {"ok": True, "service": "StockSense Image Extractor"}
+    return {"ok": True, "service": "StockSense Image Extractor", "version": "v2_color_aware"}
 
 
 @app.options("/extract")
 def extract_preflight():
-    """明確處理 CORS preflight"""
     return {"ok": True}
 
 
@@ -176,14 +188,11 @@ async def extract(
     file: UploadFile = File(...),
     authorization: Optional[str] = Header(None),
 ):
-    """主端點:接收 Excel,抽圖,上傳 Storage,回傳結果供前端核對。"""
-    # 驗身份
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="缺少 Authorization header")
     access_token = authorization.split(" ", 1)[1]
-    await verify_token(authorization)  # 丟出 401 就中斷
+    await verify_token(authorization)
 
-    # 存上傳檔到暫存目錄
     tmpdir = tempfile.mkdtemp(prefix="ssx_")
     try:
         in_path = os.path.join(tmpdir, file.filename)
@@ -191,7 +200,6 @@ async def extract(
         with open(in_path, "wb") as f:
             f.write(content)
 
-        # 若是 .xls 先轉 .xlsx
         if file.filename.lower().endswith(".xls"):
             xlsx_path = convert_xls_to_xlsx(in_path, tmpdir)
         elif file.filename.lower().endswith(".xlsx"):
@@ -199,30 +207,30 @@ async def extract(
         else:
             raise HTTPException(status_code=400, detail="只接受 .xls 或 .xlsx 檔")
 
-        # 抽圖+對應款號
         images = extract_images_with_styles(xlsx_path)
 
-        # 上傳到 Storage
         results = []
         for img in images:
-            # 清理款號:只保留字母數字,去掉中文/空格/特殊字元
             safe_style = re.sub(r'[^A-Za-z0-9_-]', '', img['style_no'])
-            unique_name = f"{safe_style}_{uuid.uuid4().hex[:8]}.{img['image_ext']}"
+            safe_color = re.sub(r'[^A-Za-z0-9_-]', '', img.get('color_code', ''))
+            unique_name = f"{safe_style}_{safe_color}_{uuid.uuid4().hex[:6]}.{img['image_ext']}"
             try:
                 url = await upload_to_supabase_storage(img["image_bytes"], unique_name)
                 results.append({
                     "style_no": img["style_no"],
+                    "color_code": img.get("color_code", ""),
                     "image_url": url,
                     "filename": unique_name,
                 })
-                print(f"✅ 上傳成功: {img['style_no']} -> {unique_name} ({len(img['image_bytes'])} bytes)")
+                print(f"✅ 上傳成功: {img['style_no']}/{img.get('color_code','')} -> {unique_name}")
             except Exception as e:
                 err_msg = str(e)
                 results.append({
                     "style_no": img["style_no"],
+                    "color_code": img.get("color_code", ""),
                     "error": err_msg,
                 })
-                print(f"❌ 上傳失敗: {img['style_no']} ({img['image_ext']}, {len(img['image_bytes'])} bytes) -> {err_msg}")
+                print(f"❌ 上傳失敗: {img['style_no']}/{img.get('color_code','')} -> {err_msg}")
 
         return {
             "ok": True,
